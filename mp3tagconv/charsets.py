@@ -94,10 +94,11 @@ def pua_to_big5(ch: str) -> bytes | None:
     return None
 
 
-def restore_pua(text: str) -> tuple[str, int, int]:
+def restore_pua(text: str, accept: Callable[[str], bool] | None = None) -> tuple[str, int, int]:
     """Replace cp950 private-use characters by the characters UAO assigns.
 
-    Returns ``(text, restored, remaining)``.
+    ``accept`` can veto a replacement character.  Returns ``(text, restored,
+    remaining)``.
     """
     if not any(is_pua(ch) for ch in text):
         return text, 0, 0
@@ -106,7 +107,7 @@ def restore_pua(text: str) -> tuple[str, int, int]:
         if is_pua(ch):
             code = pua_to_big5(ch)
             real = _BIG5_DECODE.get(int.from_bytes(code, "big")) if code else None
-            if real is not None:
+            if real is not None and (accept is None or accept(real)):
                 out.append(real)
                 restored += 1
                 continue
@@ -121,6 +122,10 @@ def _encode_big5(text: str) -> bytes:
         if ch < "\x80":
             out.append(ord(ch))
             continue
+        if 0xFF61 <= ord(ch) <= 0xFF9F:
+            # UAO gave half-width katakana codes of their own, but no Big5
+            # misreading ever *produces* them: they come from Shift_JIS
+            raise UnicodeEncodeError(BIG5, text, i, i + 1, "half-width katakana")
         code = _BIG5_ENCODE.get(ch) or (pua_to_big5(ch) if is_pua(ch) else None)
         if code is None:
             try:

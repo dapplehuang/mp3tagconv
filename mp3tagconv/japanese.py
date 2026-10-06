@@ -34,18 +34,35 @@ def restore_marks(text: str, hints: Hints | None = None) -> str:
     japanese = HIRA in classes or KATA in classes
     out = list(text)
     last = len(text) - 1
+
+    def lengthens(i: int) -> bool:
+        """Is the stand-in at ``i`` the long vowel of a katakana word?"""
+        # Only katakana words are lengthened this way, and the mark ends or
+        # continues the word: before kanji it is 一年, 一覧, a dash.
+        if i == 0 or classes[i - 1] != KATA:
+            return False
+        if i < last and classes[i + 1] == HAN:
+            return False
+        if text[i] == "一":
+            return text[i + 1:i + 2] not in ("つ", "っ")  # アイテム一つ
+        # － is also a dash in its own right.  Whoever typed a real ー in the
+        # same word had no need of a stand-in: 愛のテーマ－ ends a subtitle.
+        left = right = i
+        while left > 0 and classes[left - 1] == KATA:
+            left -= 1
+        while right < last and classes[right + 1] == KATA:
+            right += 1
+        return LONG_VOWEL not in text[left:right + 1]
+
+    # one － that is plainly a dash (－ファイナルファンタジー－) makes them all dashes
+    dashes = [i for i, ch in enumerate(text) if ch == "－"]
+    dash_is_stand_in = all(lengthens(i) for i in dashes)
+
     for i, ch in enumerate(text):
         following = text[i + 1] if i < last else ""
         if ch in _LONG_VOWEL_STAND_INS:
-            # Only katakana words are lengthened this way, and the mark ends
-            # or continues the word: before kanji it is 一年, 一覧, a dash.
-            if i == 0 or char_class(out[i - 1]) != KATA:
-                continue
-            if following and classes[i + 1] == HAN:
-                continue
-            if ch == "一" and following in ("つ", "っ"):
-                continue  # アイテム一つ
-            out[i] = LONG_VOWEL
+            if lengthens(i) and (ch == "一" or dash_is_stand_in):
+                out[i] = LONG_VOWEL
         elif ch == _INTERPUNCT:
             # In Chinese text ‧ is the right character (湯姆‧克魯斯).
             if japanese or (hints is not None and (

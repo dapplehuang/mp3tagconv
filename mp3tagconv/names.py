@@ -20,9 +20,9 @@ from functools import lru_cache
 
 from . import charsets
 from .charsets import BIG5, EUCJP, EUCKR, GBK, SJIS, UTF8, WESTERN
-from .detect import PROFILES
+from .detect import DEFAULT_PRIORS, PROFILES, accented_letter_penalty, restore_pua
 from .japanese import restore_marks
-from .plausibility import Plausibility, convincing, plausibility
+from .plausibility import WEST, Plausibility, convincing, plausibility
 
 #: Code pages a name may have been wrongly decoded with ...
 _MISREAD_AS = (BIG5, GBK, SJIS, EUCKR, WESTERN, "latin-1", "cp437", "cp850")
@@ -31,8 +31,8 @@ _REALLY = (UTF8, SJIS, BIG5, GBK, EUCJP, EUCKR)
 
 _ILLEGAL = frozenset('<>:"/\\|?*')
 _INVISIBLE = frozenset(
-    "­​‌‍‎‏‪‫‬‭‮"
-    "⁠⁡⁢⁣⁤⁦⁧⁨⁩﻿"
+    "\u00ad\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    "\u2060\u2061\u2062\u2063\u2064\u2066\u2067\u2068\u2069\ufeff"
 )
 _RESERVED = frozenset(
     ["CON", "PRN", "AUX", "NUL"] + [f"COM{i}" for i in range(1, 10)] + [f"LPT{i}" for i in range(1, 10)]
@@ -78,7 +78,7 @@ def _keeps_shape(text: str) -> bool:
 @lru_cache(maxsize=4096)
 def _best_reading(name: str) -> _Reading | None:
     """The most plausible way ``name`` could be a misdecoded other name."""
-    as_is, _, _ = charsets.restore_pua(name)
+    as_is, _, _ = restore_pua(name)
     base = plausibility(as_is)
     best: _Reading | None = None
     for wrong in _MISREAD_AS:
@@ -92,28 +92,41 @@ def _best_reading(name: str) -> _Reading | None:
             if right == wrong:
                 continue
             try:
-                text = charsets.decode(raw, right)
+                spans = charsets.decode_spans(raw, right)
             except UnicodeDecodeError:
                 continue
+            text = "".join(ch for ch, _, _ in spans)
             if text == as_is or text == name or not _keeps_shape(text):
                 continue
             p = plausibility(text, PROFILES[right])
             if not convincing(p) or p.anomalies > 0:
                 continue
-            total = p.score + (2.0 * p.chars if right == UTF8 else 0.0)
+            # the same biases as for tags: EUC-JP and Korean are the rare
+            # case, and an ideograph inside a Western word is an accent
+            total = p.score + DEFAULT_PRIORS.get(right, 0.0)
+            total += 2.0 * p.chars if right == UTF8 else -accented_letter_penalty(raw, spans)
             if best is None or total > best.total:
                 best = _Reading(text, f"{wrong}→{right}", p, total, False)
     if best is None:
         return None
     gain = best.total - max(base.score, 0.0)
-    if gain < 6.0:
-        return None
-    # A name that already reads well needs overwhelming evidence; one that
-    # does not only needs a reading that does.
-    if convincing(base) and base.anomalies == 0:
-        confident = best.total >= 2.0 * base.score + 6.0
+    if base.anomalies >= 1 or (base.profile == WEST and not convincing(base)):
+        # the name has characters no real name has: a reading without them wins
+        if gain < 6.0:
+            return None
+        confident = gain >= 8.0
+    elif base.letters >= 3 and base.average < 1.0:
+        # every character is legitimate but none is common - how a wrong code
+        # page looks, and also a name like 魑魅魍魎: want a lot before renaming
+        if gain < 6.0:
+            return None
+        confident = gain >= 12.0 and best.plaus.average >= 3.0
     else:
-        confident = best.plaus.average >= 3.0
+        # a name that reads well needs overwhelming evidence
+        worth = max(base.score, 2.0 * base.letters)
+        if best.total < worth + 6.0:
+            return None
+        confident = best.total >= 2.0 * worth + 6.0
     return _Reading(best.text, best.route, best.plaus, best.total, confident)
 
 
@@ -156,7 +169,7 @@ def fix_name(name: str, *, is_dir: bool = False, pua: bool = True, mojibake: boo
         if reading is not None:
             suggestion, suggestion_reason = reading.text + extension, reading.route
         if pua:
-            restored, count, _ = charsets.restore_pua(text)
+            restored, count, _ = restore_pua(text)
             if count:
                 text = restored
                 reasons.append("pua")

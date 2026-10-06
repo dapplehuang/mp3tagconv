@@ -80,19 +80,28 @@ def _misread(text: str, real: str, shown_as: str) -> str | None:
 def test_gbk_shown_as_big5():
     names = ["千里之外", "青花瓷", "周杰伦 - 七里香", "海阔天空", "光辉岁月", "真的爱你",
              "筷子兄弟 - 老男孩", "怒放的生命", "平凡之路", "北京欢迎你", "刘德华 - 忘情水"]
-    repaired = 0
-    for name in names:
-        garbage = _misread(name, "gbk", charsets.BIG5)
-        assert garbage is not None
+    garbled = [_misread(name, "gbk", charsets.BIG5) for name in names]
+    assert None not in garbled
+    # The garbage is made of real, merely uncommon, Traditional characters -
+    # as is a name like 魑魅魍魎.  Alone, most names are only suggested ...
+    recognised = 0
+    for name, garbage in zip(names, garbled):
         fix = fix_name(garbage + ".mp3")
-        # a three-character name is too little to go on (青花瓷 reads ヤ豪棟);
-        # what must never happen is a rename to something else
+        # ... (three characters are too little to go on at all: 青花瓷 reads
+        # ヤ豪棟) and what must never happen is a rename to something else
         if fix.changed:
             assert fix.fixed == name + ".mp3"
-            repaired += 1
         else:
             assert fix.suggestion in (None, name + ".mp3")
-    assert repaired >= 8
+        recognised += fix.changed or fix.suggestion is not None
+    assert recognised >= 8
+    # ... but an archive is misread as a whole, and one long name settles it
+    routes = frozenset(filter(None, (confident_route(garbage + ".mp3") for garbage in garbled)))
+    assert routes == {"big5-uao→gbk"}
+    fixed = [fix_name(garbage + ".mp3", trusted_routes=routes) for garbage in garbled]
+    assert sum(fix.fixed == name + ".mp3" for name, fix in zip(names, fixed)) >= 8
+    assert all(fix.fixed in (name + ".mp3", garbage + ".mp3")
+               for name, garbage, fix in zip(names, garbled, fixed))
 
 
 def test_siblings_vouch_for_an_uncertain_name():
@@ -116,8 +125,8 @@ def test_extension_is_kept():
 
 
 @pytest.mark.parametrize("name, cleaned", [
-    ("zero​width.mp3", "zerowidth.mp3"),
-    ("‮gpj.exe", "gpj.exe"),          # right-to-left override
+    ("zero\u200bwidth.mp3", "zerowidth.mp3"),
+    ("\u202egpj.exe", "gpj.exe"),          # right-to-left override
     ("trailing dot.", "trailing dot"),
     ("trailing space ", "trailing space"),
     ("CON", "_CON"), ("aux.mp3", "_aux.mp3"), ("COM1.txt", "_COM1.txt"),
@@ -132,7 +141,7 @@ def test_clean_for_windows(name, cleaned):
 
 
 def test_windows_reason_is_reported():
-    fix = fix_name("live​.mp3")
+    fix = fix_name("live\u200b.mp3")
     assert (fix.fixed, fix.reasons) == ("live.mp3", ("windows",))
 
 
@@ -141,7 +150,7 @@ def test_checks_can_be_switched_off():
     assert not fix_name(shown, pua=False).changed
     garbage = "ハチミツ".encode("cp932").decode("cp437")
     assert not fix_name(garbage, mojibake=False).changed
-    assert not fix_name("x​", windows=False).changed
+    assert not fix_name("x\u200b", windows=False).changed
 
 
 @pytest.mark.parametrize("filename, title", [

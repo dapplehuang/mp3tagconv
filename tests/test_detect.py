@@ -4,7 +4,7 @@ import corpus
 from mp3tagconv import charsets
 from mp3tagconv.charsets import BIG5, EUCJP, EUCKR, GBK, SJIS, UTF8, WESTERN
 from mp3tagconv.detect import Hints, detect, repair_unicode
-from mp3tagconv.plausibility import GARBLED, OK
+from mp3tagconv.plausibility import GARBLED, OK, plausibility, verdict
 
 # Bytes found in real files (declared as Latin-1 or sitting in ID3v1 tags).
 REAL = [
@@ -172,6 +172,13 @@ def test_repair_private_use_characters():
                                   "奧井雅美", "Sakura（サイドプロテア）", "© 2004"])
 def test_good_unicode_is_left_alone(text):
     assert repair_unicode(text).text == text
+
+
+@pytest.mark.parametrize("text", ["戻ってきた日常", "守ってあげたい", "持ってけ泥棒", "リラが散っても"])
+def test_small_tsu_after_kanji_is_ordinary(text):
+    p = plausibility(text)
+    assert (p.hard, verdict(p)) == (0, OK)
+    assert detect(text.encode("cp932")).text == text
 
 
 def test_no_unicode_repairs_across_languages():

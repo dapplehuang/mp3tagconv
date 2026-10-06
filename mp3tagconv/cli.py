@@ -15,7 +15,8 @@ from .undo import UndoLog, undo
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mp3tagconv",
-        description="將 MP3 標籤轉為 ID3v2.4 UTF-8，並修復檔名/目錄名的編碼問題。")
+        description="將 MP3 標籤轉為 ID3v2.4 UTF-8、統一 FLAC 標籤的格式，"
+                    "並修復檔名/目錄名的編碼問題。")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -31,6 +32,8 @@ def _parser() -> argparse.ArgumentParser:
     convert.add_argument("--no-undo", action="store_true", help="不保存還原資料")
     convert.add_argument("--no-tags", action="store_true", help="不處理標籤，只檢查檔名")
     convert.add_argument("--no-rename", action="store_true", help="不檢查檔名，只處理標籤")
+    convert.add_argument("--only", choices=("mp3", "flac"),
+                         help="只處理這種格式的標籤 (檔名檢查不受影響)")
     convert.add_argument("--force-encoding", metavar="ENC", choices=charsets.TAG_ENCODINGS,
                          help="舊編碼文字一律先以此編碼解讀，解不開才自動偵測 "
                               f"({', '.join(charsets.TAG_ENCODINGS)})")
@@ -55,7 +58,7 @@ def _convert(args: argparse.Namespace) -> int:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     options = Options(apply=args.apply, tags=not args.no_tags, names=not args.no_rename,
                       force_encoding=args.force_encoding, skip_uncertain=args.skip_uncertain,
-                      keep_mtime=args.keep_mtime, fix_ja_marks=args.fix_ja_marks)
+                      keep_mtime=args.keep_mtime, fix_ja_marks=args.fix_ja_marks, only=args.only)
     report_path = args.report or Path(f"mp3tagconv-{stamp}-{'applied' if args.apply else 'preview'}.txt")
     log = None
     exclude: tuple[Path, ...] = ()
@@ -85,12 +88,13 @@ def _convert(args: argparse.Namespace) -> int:
     writes = sum(1 for p in result.plans if p.needs_write)
     renames = sum(1 for r in result.renames if r.status in ("planned", "done"))
     if args.apply:
-        print(f"完成：寫入 {result.written} 個 MP3 的標籤，更名 {renames} 個項目，錯誤 {result.errors}。")
+        print(f"完成：寫入 {result.written} 個檔案的標籤，更名 {renames} 個項目，錯誤 {result.errors}。")
         if log is not None:
             print(f"還原資料：{log.directory}")
             print(f"  要復原請執行: mp3tagconv undo \"{log.directory}\"")
     else:
-        print(f"預覽：{result.mp3_files} 個 MP3 中有 {writes} 個需要改寫標籤，"
+        seen = "、".join(f"{n} 個 {fmt}" for fmt, n in sorted(result.files.items())) or "0 個音訊檔"
+        print(f"預覽：{seen} 中有 {writes} 個需要改寫標籤，"
               f"{renames} 個檔名/目錄名需要變更。沒有修改任何檔案。")
         print("  確認報告後，加上 --apply 重新執行即可寫入。")
     print(f"報告：{report_path.resolve()}")
@@ -100,7 +104,8 @@ def _convert(args: argparse.Namespace) -> int:
 def _undo(args: argparse.Namespace) -> int:
     try:
         undone, failed = undo(args.undo_dir, args.root, rewrite.restore, rewrite.rename,
-                              lambda message: print(f"  失敗 {message}", file=sys.stderr))
+                              lambda message: print(f"  失敗 {message}", file=sys.stderr),
+                              rewrite.unpatch)
     except (OSError, ValueError) as exc:
         print(f"無法讀取還原資料: {exc}", file=sys.stderr)
         return 2

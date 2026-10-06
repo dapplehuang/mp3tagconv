@@ -15,7 +15,7 @@ from typing import Iterable, Mapping
 from . import charsets
 from .charsets import BIG5, EUCJP, EUCKR, GBK, SJIS, UTF8, WESTERN
 from .plausibility import (ALL_PROFILES, GARBLED, JA, KO, OK, SC, TC, WEST, Plausibility,
-                           convincing, plausibility, verdict)
+                           convincing, is_everyday, plausibility, verdict)
 
 #: Tie-breaking bias; this tool is aimed at a Traditional Chinese collection,
 #: where EUC-JP and Korean tags are the rare exception.
@@ -85,7 +85,7 @@ class Detection:
         return "high" if self.margin >= HIGH else "medium" if self.margin >= MEDIUM else "low"
 
 
-def _accented_letter_penalty(data: bytes, spans: list[tuple[str, int, int]]) -> float:
+def accented_letter_penalty(data: bytes, spans: list[tuple[str, int, int]]) -> float:
     """Penalise a lone multi-byte character that sits where an accented letter would.
 
     ``Ásgeir`` in cp1252 is also a valid Big5 character followed by ``geir``,
@@ -160,7 +160,7 @@ def detect(data: bytes, *, hints: Hints | None = None,
             # well-formed multi-byte UTF-8 almost never happens by accident
             total += 2.0 * p.chars
         elif encoding != WESTERN:
-            total -= _accented_letter_penalty(data, spans)
+            total -= accented_letter_penalty(data, spans)
         if hints is not None and p.score > 0:
             total += hints.bonus(text)
         candidate = Candidate(encoding, text, p, total)
@@ -196,15 +196,28 @@ def detect(data: bytes, *, hints: Hints | None = None,
                      runner_up, cut, others)
 
 
+def restore_pua(text: str) -> tuple[str, int, int]:
+    """:func:`charsets.restore_pua`, keeping only restorations that read as text.
+
+    A private-use code point is whatever its user defined it to be.  UAO's
+    table is a good guess when it yields kana or an everyday ideograph, and a
+    bad one when it turns a stray glyph into a rare Simplified character.
+    """
+    return charsets.restore_pua(text, is_everyday)
+
+
 def repair_unicode(text: str, *, hints: Hints | None = None,
-                   priors: Mapping[str, float] | None = None) -> Detection:
-    """Check text that is already Unicode (UTF-16/UTF-8 frames, APEv2 values).
+                   priors: Mapping[str, float] | None = None,
+                   trusted: str | None = None) -> Detection:
+    """Check text that is already Unicode (UTF-16/UTF-8 frames, APEv2 and Vorbis values).
 
     Two kinds of damage are undone: private-use characters left by a code
     page 950 conversion that did not know UAO, and legacy bytes that were
     widened to Unicode one byte per character (``ÀuÆý`` for ``優し``).
+    ``trusted`` names the encoding other fields of the same file were
+    widened from; a field that decodes the same way needs no further proof.
     """
-    restored, fixed, _ = charsets.restore_pua(text)
+    restored, fixed, _ = restore_pua(text)
     if fixed:
         p = plausibility(restored)
         return Detection(restored, "unicode-pua", 99.0, p, verdict(p))
@@ -217,8 +230,12 @@ def repair_unicode(text: str, *, hints: Hints | None = None,
             raw = b""
         if any(b >= 0x80 for b in raw):
             found = detect(raw, hints=hints, priors=priors)
-            if (found.encoding not in (WESTERN, "latin-1") and found.verdict == OK
-                    and found.margin >= MEDIUM and found.plaus.score >= p.score + HIGH):
+            legacy = found.encoding not in (WESTERN, "latin-1") and found.verdict == OK
+            # proof: it reads far better, or the file's own path spells it this way
+            proven = found.margin >= MEDIUM and (
+                found.plaus.score >= p.score + HIGH
+                or (hints is not None and hints.bonus(found.text) >= 4.5))
+            if legacy and (proven or found.encoding == trusted):
                 return Detection(found.text, "unicode-" + found.encoding, found.margin,
                                  found.plaus, found.verdict, found.runner_up)
     return Detection(text, "unicode", 99.0, p, verdict(p))

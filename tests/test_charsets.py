@@ -45,11 +45,11 @@ def test_pua_mapping_agrees_with_uao_table():
     # assigns to the user-defined Big5 ranges (U+E000-U+F848); ours is computed.
     checked = 0
     for ch, code in u2b_table.items():
-        if len(ch) == 1 and "" <= ch <= "" and len(code) == 2:
+        if len(ch) == 1 and "\ue000" <= ch <= "\uf848" and len(code) == 2:
             assert charsets.pua_to_big5(ch) == code, hex(ord(ch))
             checked += 1
     assert checked > 5000
-    assert charsets.pua_to_big5("") is None
+    assert charsets.pua_to_big5("\uf849") is None
 
 
 def _as_cp950_shows_it(text: str) -> str:

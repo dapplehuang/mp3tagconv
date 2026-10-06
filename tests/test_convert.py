@@ -106,6 +106,29 @@ def test_apev2_only(tmp_path, make_mp3):
         APEv2(path)
 
 
+def _ape_tag(items: dict[str, bytes]) -> bytes:
+    """An APEv2 tag with a footer only; values are written as given."""
+    body = b"".join(len(value).to_bytes(4, "little") + bytes(4) + key.encode() + b"\x00" + value
+                    for key, value in items.items())
+    footer = (b"APETAGEX" + (2000).to_bytes(4, "little") + (len(body) + 32).to_bytes(4, "little")
+              + len(items).to_bytes(4, "little") + bytes(12))
+    return body + footer
+
+
+def test_apev2_text_that_is_not_utf8(tmp_path):
+    # mutagen rejects the whole tag for this; the title is plain Shift_JIS
+    path = tmp_path / "02-雨色パラソル.mp3"
+    path.write_bytes(AUDIO + _ape_tag({"Title": "雨色パラソル".encode("cp932"),
+                                       "Artist": "大塚愛".encode("utf-8"),
+                                       "Track": b"2"}))
+    result = convert(tmp_path)
+    assert result.errors == 0
+    assert text(path, "TIT2") == ["雨色パラソル"]
+    assert text(path, "TPE1") == ["大塚愛"]
+    assert text(path, "TRCK") == ["2"]
+    assert path.read_bytes().endswith(AUDIO)
+
+
 def test_id3v2_wins_over_apev2_wins_over_id3v1(tmp_path, make_mp3):
     path = make_mp3(
         "a.mp3",
@@ -237,7 +260,7 @@ def test_names_and_undo(tmp_path, make_mp3):
              frames=[TIT2(encoding=0, text=[legacy("ひとりごと", BIG5)])],
              ape={"Album": "hitorigoto"}, v1=id3v1(title=encode("ひとりごと", BIG5)))
     (root / album / "cover.jpg").write_bytes(b"jpeg")
-    (root / "zero​width.txt").write_text("x")
+    (root / "zero\u200bwidth.txt").write_text("x")
     before = snapshot(root)
 
     result = convert(root, tmp_path / "undo")

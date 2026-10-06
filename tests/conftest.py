@@ -64,6 +64,64 @@ def id3v1(title=b"", artist=b"", album=b"", year=b"", comment=b"", track=0, genr
             + pad(comment, 28) + bytes((0, track, genre)))
 
 
+def _flac_block(kind: int, data: bytes, last: bool = False) -> bytes:
+    return bytes((kind | (0x80 if last else 0),)) + len(data).to_bytes(3, "big") + data
+
+
+# STREAMINFO of a 44.1 kHz 16-bit stereo stream; the frames are never decoded
+_STREAMINFO = (bytes.fromhex("10001000" "000000" "000000") + (44100 << 44 | 1 << 41 | 15 << 36 | 4410)
+               .to_bytes(8, "big") + bytes(16))
+FLAC_AUDIO = (b"\xff\xf8\xc9\x18" + bytes(range(256))) * 12
+
+
+def flac_bytes(comments=None, vendor=b"reference libFLAC 1.2.1 20070917", padding=4096,
+               picture: bytes | None = None, raw_comments: list[bytes] | None = None) -> bytes:
+    """A FLAC stream with the given comments: ``[(key, value), ...]`` or None for no block."""
+    blocks = [(0, _STREAMINFO)]
+    if comments is not None or raw_comments is not None:
+        entries = [f"{k}={v}".encode("utf-8") for k, v in comments or []] + (raw_comments or [])
+        body = len(vendor).to_bytes(4, "little") + vendor + len(entries).to_bytes(4, "little")
+        body += b"".join(len(e).to_bytes(4, "little") + e for e in entries)
+        blocks.append((4, body))
+    if picture is not None:
+        blocks.append((6, picture))
+    if padding is not None:
+        blocks.append((1, bytes(padding)))
+    out = b"fLaC" + b"".join(_flac_block(kind, data, i == len(blocks) - 1)
+                             for i, (kind, data) in enumerate(blocks))
+    return out + FLAC_AUDIO
+
+
+@pytest.fixture
+def make_flac(tmp_path):
+    """Write a FLAC file, optionally with the ID3/APE tags some rippers put on them."""
+
+    def make(name: str, comments=None, directory: Path | None = None, id3_frames=(),
+             ape=None, v1: bytes | None = None, **stream) -> Path:
+        path = (directory or tmp_path) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(flac_bytes(comments, **stream))
+        if id3_frames:
+            tags = ID3()
+            for frame in id3_frames:
+                tags.add(frame)
+            body = path.read_bytes()
+            path.write_bytes(b"")
+            tags.save(path, v1=0, v2_version=3)
+            with open(path, "ab") as f:
+                f.write(body)
+        if ape:
+            items = APEv2()
+            items.update(ape)
+            items.save(path)
+        if v1 is not None:
+            with open(path, "ab") as f:
+                f.write(v1)
+        return path
+
+    return make
+
+
 @pytest.fixture
 def make_mp3(tmp_path):
     """Write an MP3 with any mix of ID3v2 frames, APEv2 items and an ID3v1 block."""

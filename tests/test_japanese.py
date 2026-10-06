@@ -40,6 +40,9 @@ def test_stand_ins_are_restored(typed, meant):
     "アニメ－主題歌",            # a dash between a word and kanji
     "A－B",
     "ロック － ポップ",          # a spaced dash
+    # － used as a dash: the pair around a subtitle, and a word that already has its ー
+    "月の明り －ファイナルファンタジー IV 愛のテーマ－",
+    "愛のテーマ－",
     "TALK ON 忍‧美由希‧那美",  # no kana: could be Chinese, where ‧ is right
     "湯姆‧克魯斯",
     "P‧E‧T‧S",
@@ -47,6 +50,12 @@ def test_stand_ins_are_restored(typed, meant):
 ])
 def test_everything_else_is_left_alone(text):
     assert restore_marks(text) == text
+
+
+def test_real_long_vowel_elsewhere_does_not_stop_a_fix():
+    # イメージ is another word; スク－ル still needs its mark
+    assert restore_marks("スク－ルランブル：塚本八雲イメージアルバム") == \
+        "スクールランブル：塚本八雲イメージアルバム"
 
 
 def test_path_vouches_for_a_middle_dot():
@@ -111,6 +120,7 @@ def test_names_are_fixed_too(name, fixed):
 
 
 @pytest.mark.parametrize("name", [
+    "07 月の明り －ファイナルファンタジー IV 愛のテーマ－.flac",
     "ガンダム一年戦争.mp3", "アニメ一覧.txt", "東京－大阪.mp3", "湯姆‧克魯斯 - 歌.mp3",
     "高瀨一矢", "第一話.mp3", "ラクス・クライン(田中理恵)-水の証.mp3", "サムライチャンプルー",
 ])

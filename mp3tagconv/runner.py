@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
-from . import rewrite, tags
+from . import flac, rewrite, tags
 from .detect import Hints
 from .names import NameFix, confident_route, fix_name
 from .undo import UndoLog
@@ -24,6 +24,7 @@ class Options:
     skip_uncertain: bool = False
     keep_mtime: bool = False
     fix_ja_marks: bool = False
+    only: str | None = None  #: "mp3" or "flac": leave the tags of the other format alone
 
 
 @dataclass
@@ -43,10 +44,10 @@ class Rename:
 class Result:
     root: Path
     options: Options
-    plans: list[tags.Plan] = field(default_factory=list)     #: MP3s with something to report
+    plans: list[tags.Plan] = field(default_factory=list)     #: files with something to report
     renames: list[Rename] = field(default_factory=list)
     suggestions: list[Rename] = field(default_factory=list)  #: possible mojibake, left alone
-    mp3_files: int = 0
+    files: Counter = field(default_factory=Counter)          #: audio files seen, by format
     entries: int = 0
     written: int = 0
     skipped_uncertain: int = 0
@@ -61,8 +62,13 @@ def _directory_name(name: str, ja_marks: bool) -> str:
     return fix_name(name, is_dir=True, ja_marks=ja_marks).fixed
 
 
-def _is_mp3(name: str) -> bool:
-    return name.lower().endswith(".mp3")
+#: The module that reads and plans each kind of file: ``load()`` and ``plan()``.
+_FORMATS = {".mp3": tags, ".flac": flac}
+
+
+def _format(name: str, only: str | None = None):
+    extension = os.path.splitext(name)[1].lower()
+    return _FORMATS.get(extension) if only in (None, extension[1:]) else None
 
 
 def _plan_names(directory: Path, dirnames: list[str], filenames: list[str],
@@ -80,31 +86,34 @@ def _plan_names(directory: Path, dirnames: list[str], filenames: list[str],
 
 def _plan_tags(root: Path, directory: Path, filenames: list[str], fixes: dict[str, Rename],
                options: Options) -> list[tags.Plan]:
-    """Tag plans for the MP3s of one directory, decided together."""
+    """Tag plans for the audio files of one directory, decided together."""
     relative = directory.relative_to(root).parts
     ancestors = [root.name] + [_directory_name(part, options.fix_ja_marks) for part in relative]
     loaded = []
-    for name in sorted(filter(_is_mp3, filenames)):
+    for name in sorted(filenames):
+        handler = _format(name, options.only)
+        if handler is None:
+            continue
         fixed = fixes[name].fix.fixed if name in fixes else name
         try:
-            item = tags.load(directory / name, Hints.from_names(ancestors + [fixed]), fixed)
+            item = handler.load(directory / name, Hints.from_names(ancestors + [fixed]), fixed)
         except OSError as exc:
-            loaded.append(tags.Plan(directory / name, tags.Layout(0, 0, 0), error=str(exc)))
+            loaded.append((handler, handler.Plan(directory / name, tags.Layout(0, 0, 0), error=str(exc))))
             continue
         if not item.error:
             tags.first_pass(item, options.force_encoding)
-        loaded.append(item)
+        loaded.append((handler, item))
     # an album is tagged by one person with one tool: let the files agree
     directory_votes: Counter = Counter()
-    for item in loaded:
+    for _, item in loaded:
         if isinstance(item, tags.Loaded) and not item.error:
             directory_votes += tags.votes(item)
     plans = []
-    for item in loaded:
+    for handler, item in loaded:
         if isinstance(item, tags.Loaded):
             if not item.error:
                 tags.second_pass(item, directory_votes, options.force_encoding)
-            item = tags.plan(item, options.fix_ja_marks)
+            item = handler.plan(item, options.fix_ja_marks)
         plans.append(item)
     return plans
 
@@ -132,7 +141,7 @@ def run(root: Path, options: Options, undo: UndoLog | None = None,
 
         if options.tags:
             for plan in _plan_tags(root, directory, filenames, fixes, options):
-                result.mp3_files += 1
+                result.files[plan.format] += 1
                 if options.apply and plan.needs_write and not plan.error:
                     if options.skip_uncertain and plan.uncertain:
                         result.skipped_uncertain += 1
@@ -142,6 +151,8 @@ def run(root: Path, options: Options, undo: UndoLog | None = None,
                             result.written += 1
                         except Exception as exc:
                             plan.error = f"{type(exc).__name__}: {exc}"
+                if isinstance(plan, flac.Plan):
+                    plan.blocks = []  # cover art and all: not needed for the report
                 if plan.needs_write or plan.error or plan.notes:
                     result.plans.append(plan)
 

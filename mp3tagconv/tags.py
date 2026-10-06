@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, Mapping
 
-from mutagen.apev2 import APEv2
 from mutagen.id3 import (APIC, COMM, ID3, TCON, TDRC, TIT2, TXXX, USLT, Encoding, Frames,
                          ID3TimeStamp)
 
@@ -42,8 +41,12 @@ class Layout:
     audio_end: int    #: start of the trailing tags
     id3v2: tuple[int, int] | None = None  #: (major, revision) of the leading tag
     id3v1_at: int | None = None
-    apev2: bool = False
+    apev2_at: tuple[int, int] | None = None  #: items and footer of the APEv2 tag
     lyrics3: bool = False
+
+    @property
+    def apev2(self) -> bool:
+        return self.apev2_at is not None
 
     @property
     def tagged(self) -> bool:
@@ -71,7 +74,7 @@ def read_layout(f: BinaryIO) -> Layout:
         version = version or (header[3], header[4])
         start += length
 
-    end, id3v1_at, apev2, lyrics3 = size, None, False, False
+    end, id3v1_at, apev2_at, lyrics3 = size, None, None, False
     while True:
         if end - 128 >= start and _read_at(f, end - 128, 3) == b"TAG":
             end -= 128
@@ -84,8 +87,8 @@ def read_layout(f: BinaryIO) -> Layout:
                 body, _, flags = struct.unpack_from("<III", footer, 12)
                 length = body + (32 if flags & 0x80000000 else 0)
                 if body >= 32 and end - length >= start:
+                    apev2_at = apev2_at or (end - body, end)
                     end -= length
-                    apev2 = True
                     continue
         if end - 15 >= start:
             marker = _read_at(f, end - 9, 9)
@@ -105,7 +108,7 @@ def read_layout(f: BinaryIO) -> Layout:
                     lyrics3 = True
                     continue
         break
-    return Layout(size, start, end, version, id3v1_at, apev2, lyrics3)
+    return Layout(size, start, end, version, id3v1_at, apev2_at, lyrics3)
 
 
 # --------------------------------------------------------------------------
@@ -250,9 +253,11 @@ class Loaded:
     ape_slots: list[tuple[str, list[Slot]]] = field(default_factory=list)  # (item key, values)
     ape_pictures: list[tuple[int, bytes]] = field(default_factory=list)
     ape_skipped: list[str] = field(default_factory=list)
+    native_slots: list[Slot] = field(default_factory=list)             # the format's own tag (FLAC)
     error: str | None = None
 
     def slots(self) -> Iterator[Slot]:
+        yield from self.native_slots
         for slots in self.frame_slots.values():
             yield from slots.values()
         yield from self.v1_slots.values()
@@ -264,6 +269,9 @@ def load(path: Path, hints: Hints, name: str | None = None) -> Loaded:
     with open(path, "rb") as f:
         layout = read_layout(f)
         v1_block = _read_at(f, layout.id3v1_at, 128) if layout.id3v1_at is not None else None
+        ape_block = None
+        if layout.apev2_at is not None:
+            ape_block = _read_at(f, layout.apev2_at[0], layout.apev2_at[1] - layout.apev2_at[0])
     loaded = Loaded(path, layout, hints, name or path.name)
     try:
         if layout.id3v2 is not None:
@@ -276,28 +284,48 @@ def load(path: Path, hints: Hints, name: str | None = None) -> Loaded:
                     loaded.frame_slots[id(frame)] = _frame_slots(frame)
         if v1_block is not None:
             loaded.v1_slots, loaded.v1_plain = _parse_v1(v1_block)
-        if layout.apev2:
-            _load_ape(path, loaded)
+        if ape_block is not None:
+            _load_ape(ape_block, loaded)
     except Exception as exc:  # mutagen raises a zoo of errors on damaged tags
         loaded.error = f"{type(exc).__name__}: {exc}"
     return loaded
 
 
-def _load_ape(path: Path, loaded: Loaded) -> None:
-    for key, value in APEv2(path).items():
-        if value.kind == 0:  # text
+def _ape_items(block: bytes) -> Iterator[tuple[str, int, bytes]]:
+    """``(key, kind, value)`` of each item of an APEv2 tag (items + footer).
+
+    Parsed by hand: mutagen refuses the whole tag when one text item is not
+    UTF-8, and old taggers happily wrote Shift_JIS or Big5 there.
+    """
+    count, = struct.unpack_from("<I", block, len(block) - 16)
+    pos, end = 0, len(block) - 32
+    for _ in range(count):
+        if pos + 8 > end:
+            break
+        size, flags = struct.unpack_from("<II", block, pos)
+        key_end = block.find(b"\x00", pos + 8, end)
+        if key_end < 0 or key_end + 1 + size > end:
+            break
+        yield (block[pos + 8:key_end].decode("latin-1"), (flags >> 1) & 3,
+               block[key_end + 1:key_end + 1 + size])
+        pos = key_end + 1 + size
+
+
+def _load_ape(block: bytes, loaded: Loaded) -> None:
+    for key, kind, value in _ape_items(block):
+        if kind == 0:  # text, values separated by NUL
             try:
-                values = [v for v in value if v.strip()]
+                slots = [Slot(f"{APE} {key}", APE, text)
+                         for text in value.decode("utf-8").split("\x00") if text.strip()]
             except UnicodeDecodeError:
                 # not UTF-8 after all: treat like any other legacy bytes
-                slots = [Slot(f"{APE} {key}", APE, value.value.decode("latin-1"), value.value)]
-            else:
-                slots = [Slot(f"{APE} {key}", APE, v) for v in values]
+                slots = [Slot(f"{APE} {key}", APE, part.decode("latin-1"), part)
+                         for part in value.split(b"\x00") if part.strip()]
             if slots:
                 loaded.ape_slots.append((key, slots))
-        elif value.kind == 1 and key.lower() in _APE_PICTURES:
+        elif kind == 1 and key.lower() in _APE_PICTURES:
             # "<file name>\0<image data>"
-            loaded.ape_pictures.append((_APE_PICTURES[key.lower()], value.value.partition(b"\x00")[2]))
+            loaded.ape_pictures.append((_APE_PICTURES[key.lower()], value.partition(b"\x00")[2]))
         else:
             loaded.ape_skipped.append(key)
 
@@ -321,14 +349,29 @@ def _decide(slot: Slot, hints: Hints, priors: Mapping[str, float], force: str | 
                          damaged_context=damaged)
 
 
+_WIDENED = "unicode-"  # Detection.encoding prefix of repaired Unicode text
+
+
 def votes(loaded: Loaded) -> Counter:
-    """Encodings this file's unambiguous legacy fields are in."""
+    """Encodings this file's unambiguous legacy fields are in.
+
+    Unicode text that proved to be widened legacy bytes votes too, under its
+    ``unicode-<encoding>`` label.
+    """
     tally: Counter = Counter()
     for slot in loaded.slots():
         r = slot.result
         if slot.raw is not None and r.verdict == OK and r.margin >= HIGH and r.encoding in _LEGACY:
             tally[r.encoding] += 1
+        elif slot.raw is None and r.encoding.startswith(_WIDENED) and r.encoding[len(_WIDENED):] in _LEGACY:
+            tally[r.encoding] += 1
     return tally
+
+
+def _top(tally: Counter, widened: bool) -> str | None:
+    """Most voted-for encoding among the legacy (or the widened) ones."""
+    ranked = [key for key, _ in tally.most_common() if key.startswith(_WIDENED) == widened]
+    return ranked[0] if ranked else None
 
 
 def first_pass(loaded: Loaded, force: str | None = None) -> None:
@@ -340,15 +383,21 @@ def second_pass(loaded: Loaded, directory_votes: Counter, force: str | None = No
     """Settle the ambiguous fields using what the unambiguous ones turned out to be."""
     priors = dict(DEFAULT_PRIORS)
     own = votes(loaded)
-    if own:
-        encoding = own.most_common(1)[0][0]
-        priors[encoding] = priors.get(encoding, 0.0) + 2.0
-    if directory_votes:
-        encoding = directory_votes.most_common(1)[0][0]
-        priors[encoding] = priors.get(encoding, 0.0) + 1.0
+    for tally, bonus in ((own, 2.0), (directory_votes, 1.0)):
+        encoding = _top(tally, widened=False)
+        if encoding:
+            priors[encoding] = priors.get(encoding, 0.0) + bonus
     for slot in loaded.slots():
         if slot.raw is not None and slot.result.margin < HIGH and slot.verdict != GARBLED:
             _decide(slot, loaded.hints, priors, force)
+    # a tool that widened one field's bytes to Unicode widened them all, also
+    # the titles too short to prove it by themselves
+    widened = _top(own, widened=True) or _top(directory_votes, widened=True)
+    if widened:
+        for slot in loaded.slots():
+            if slot.raw is None and slot.result.encoding == "unicode":
+                slot.result = repair_unicode(slot.stored, hints=loaded.hints, priors=priors,
+                                             trusted=widened[len(_WIDENED):])
     # one field beyond repair means the same accident hit its neighbours
     if any(slot.verdict == GARBLED for slot in loaded.slots()):
         for slot in loaded.slots():
@@ -370,9 +419,17 @@ class Plan:
     notes: list[str] = field(default_factory=list)
     error: str | None = None
 
+    format = "MP3"
+    target = "ID3v2.4 UTF-8"  #: what the file's tags become
+
     @property
     def needs_write(self) -> bool:
         return self.tags is not None
+
+    @property
+    def kept(self) -> int:
+        """How many fields the rewritten tag holds."""
+        return len(self.tags) if self.tags is not None else 0
 
     @property
     def uncertain(self) -> bool:

@@ -98,7 +98,11 @@ def _hangul_score(rank: int | None) -> float | None:
 # --------------------------------------------------------------------------
 
 (ASCII, SPACE, HIRA, KATA, HAN, HANGUL, CJK_PUNCT, FULLWIDTH, HALF_KATA,
- HALF_PUNCT, LATIN, LATIN_SIGN, TYPO, FOREIGN, SYMBOL, SYMBOL_ODD, BOX, BAD) = range(18)
+ HALF_PUNCT, LATIN, LATIN_SIGN, TYPO, FOREIGN, SYMBOL, SYMBOL_ODD, BOX, BAD,
+ ALPHABET, BOPOMOFO) = range(20)
+
+#: classes that spell words, as opposed to punctuating or decorating them
+_LETTERS = frozenset((HIRA, KATA, HAN, HANGUL, HALF_KATA, LATIN, FOREIGN, ALPHABET, BOPOMOFO))
 
 _SMALL_KATA = frozenset("ァィゥェォャュョヮッ")
 _SMALL_KATA_VOWEL = frozenset("ァィゥェォ")
@@ -131,10 +135,18 @@ def char_class(ch: str) -> int:
     category = unicodedata.category(ch)
     if category in ("Cn", "Cs", "Co", "Cc"):
         return BAD
+    if cp < 0x180:
+        # ª º µ count as letters to Unicode, but turn up in mojibake, not in words
+        return LATIN if category[0] == "L" and cp not in (0xAA, 0xBA, 0xB5) else LATIN_SIGN
     if cp < 0x250:
-        return LATIN if category[0] == "L" else LATIN_SIGN
+        # Latin Extended-B: only the Pinyin and Romanian letters are in real use
+        return LATIN if 0x1CD <= cp <= 0x1DC or 0x218 <= cp <= 0x21B else FOREIGN
+    if cp in (0x2C7, 0x2C9, 0x2CA, 0x2CB, 0x2D9):
+        return TYPO  # Bopomofo tone marks
     if 0x370 <= cp < 0x530:
-        return FOREIGN  # Greek, Cyrillic
+        return ALPHABET if category[0] == "L" else SYMBOL_ODD  # Greek, Cyrillic
+    if 0x3105 <= cp <= 0x312F:
+        return BOPOMOFO
     if cp == 0x3005 or cp == 0x3006 or cp == 0x3007:
         return HAN  # 々 〆 〇
     if 0x3001 <= cp <= 0x303F or cp == 0x30FB:
@@ -172,6 +184,7 @@ class Plausibility:
     anomalies: float  #: characters that have no business being in real text
     hard: float       #: the subset no reading of intact text produces (□, impossible kana)
     profile: str
+    letters: int = 0  #: how many of ``chars`` spell words
 
     @property
     def average(self) -> float:
@@ -195,6 +208,8 @@ def convincing(p: Plausibility) -> bool:
     """Does the text read well enough that no other explanation is needed?"""
     if p.chars == 0:
         return True
+    if p.letters == 0:
+        return p.anomalies < 1  # punctuation and symbols only: YA・KU・SO・KU
     if p.profile == "west":
         return p.anomalies < 1 and p.average >= 1.0
     return verdict(p) == OK and p.anomalies < 1 and p.average >= 2.0
@@ -247,6 +262,14 @@ def _han_ko(ch: str) -> tuple[float, float]:
     return (0.3 * other, 0.0) if other else (-2.0, 1.0)
 
 
+def is_everyday(ch: str) -> bool:
+    """Kana, common punctuation, or an ideograph Japanese or Traditional Chinese uses daily."""
+    cls = char_class(ch)
+    if cls == HAN:
+        return ch in _JA or ch in _TC
+    return cls in (HIRA, KATA, CJK_PUNCT, FULLWIDTH, SYMBOL, TYPO)
+
+
 def _kana_runs(classes: list[int]) -> list[tuple[int, int, int]]:
     """Maximal runs of hiragana or katakana as ``(class, start, end)``."""
     runs, i, n = [], 0, len(classes)
@@ -276,6 +299,8 @@ def _score_kana(text: str, classes: list[int], tally: _Tally) -> None:
         before = runs[index - 1] if index and runs[index - 1][2] == start else None
         after = runs[index + 1] if index + 1 < len(runs) and runs[index + 1][1] == end else None
         in_phrase = any(r is not None and r[2] - r[1] >= 2 for r in (before, after))
+        # syllables spelled out one by one: ル・シ・ハ・コ・カ・タ
+        in_phrase |= (start > 0 and text[start - 1] == "・") or (end < n and text[end] == "・")
         bad = 0
         if cls == KATA:
             # ー may continue a hiragana word (らーめん); small kana may not start anything
@@ -297,7 +322,9 @@ def _score_kana(text: str, classes: list[int], tally: _Tally) -> None:
             if not bad and run[0] == "ン" and before is None:
                 per_char -= 1.0
         else:
-            if run[0] in _SMALL_HIRA:
+            # a small kana cannot start a word - but っ right after a kanji is
+            # the most ordinary okurigana there is (持って, 戻った)
+            if run[0] in _SMALL_HIRA and not (run[0] == "っ" and start > 0 and classes[start - 1] == HAN):
                 bad += 1
             if bad:
                 per_char = 0.0
@@ -334,7 +361,7 @@ def _score_common(cls: int, tally: _Tally) -> bool:
     return True
 
 
-def _score_cjk(text: str, classes: list[int], han, japanese: bool) -> _Tally:
+def _score_cjk(text: str, classes: list[int], han, japanese: bool, bopomofo: bool = False) -> _Tally:
     tally = _Tally()
     if japanese:
         _score_kana(text, classes, tally)
@@ -365,6 +392,10 @@ def _score_cjk(text: str, classes: list[int], han, japanese: bool) -> _Tally:
             tally.add(-1.5, soft=0.5)
         elif cls in (SYMBOL_ODD, LATIN_SIGN):
             tally.add(-1.0, soft=0.34)
+        elif cls == BOPOMOFO and bopomofo:
+            tally.add(1.0)  # 你是最ㄞˋ: Taiwanese titles play with it
+        elif cls == ALPHABET:
+            tally.add(-1.0, soft=0.5)  # a stray β or Ω is a symbol; more is another script
         else:  # LATIN, FOREIGN, HANGUL: another script altogether
             tally.add(-2.0, soft=1)
     # an opening bracket that never closes is what a misread ー or □ looks like
@@ -407,15 +438,23 @@ def _score_western(text: str, classes: list[int]) -> _Tally:
     def letter(i: int) -> bool:
         return 0 <= i < n and (classes[i] == LATIN or (classes[i] == ASCII and text[i].isalpha()))
 
+    def alphabet(i: int) -> bool:
+        return 0 <= i < n and classes[i] == ALPHABET
+
     for i, cls in enumerate(classes):
         if cls == ASCII or cls == SPACE:
             continue
-        if cls == LATIN:
+        if cls == ALPHABET:
+            # Greek and Cyrillic words are words too (Θανατος, Матрёшка)
+            tally.add(1.0 if alphabet(i - 1) or alphabet(i + 1) else 0.0)
+        elif cls == LATIN:
             if 0 < i < n - 1 and classes[i - 1] == LATIN and classes[i + 1] == LATIN:
                 # three accented letters in a row is not a word in any Western language
                 tally.add(-1.0, soft=0.5)
             elif wordlike and (letter(i - 1) or letter(i + 1)):
                 tally.add(1.5)
+            elif wordlike and text[i - 1:i].strip() == "" and text[i + 1:i + 2].strip() == "":
+                tally.add(1.0)  # a word of its own: "Ménage à trois"
             else:
                 tally.add(0.25)
         elif cls == TYPO:
@@ -438,7 +477,7 @@ ALL_PROFILES = (JA, TC, SC, KO, WEST)
 
 _SCORERS = {
     JA: lambda text, classes: _score_cjk(text, classes, _han_ja, japanese=True),
-    TC: lambda text, classes: _score_cjk(text, classes, _han_tc, japanese=False),
+    TC: lambda text, classes: _score_cjk(text, classes, _han_tc, japanese=False, bopomofo=True),
     SC: lambda text, classes: _score_cjk(text, classes, _han_sc, japanese=False),
     KO: _score_korean,
     WEST: _score_western,
@@ -459,4 +498,5 @@ def plausibility(text: str, profiles: tuple[str, ...] = ALL_PROFILES) -> Plausib
         return Plausibility(-4.0 * bad, bad, float(bad), float(bad), "ascii")
     profile, tally = max(((name, _SCORERS[name](text, classes)) for name in profiles),
                          key=lambda item: item[1].score)
-    return Plausibility(tally.score, chars, tally.soft + tally.hard, tally.hard, profile)
+    return Plausibility(tally.score, chars, tally.soft + tally.hard, tally.hard, profile,
+                        sum(1 for c in classes if c in _LETTERS))
