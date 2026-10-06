@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mp3tagconv"
+version = "0.1.0"
+description = "Convert legacy-encoded MP3 tags (Big5-UAO / Shift_JIS / GBK ...) to ID3v2.4 UTF-8 and repair mojibake file names"
+requires-python = ">=3.10"
+dependencies = [
+    "mutagen>=1.47",
+    # Big5 <-> Unicode table of the "Unicode補完計畫" (Unicode-At-On)
+    "uao>=0.2",
+    # only the per-language character frequency tables are used; they were
+    # dropped from later major versions
+    "chardet>=5,<6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+mp3tagconv = "mp3tagconv.cli:main"
+
+[tool.setuptools]
+packages = ["mp3tagconv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

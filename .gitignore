@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# mp3tagconv output
+mp3tagconv-*.txt
+mp3tagconv-undo-*/
