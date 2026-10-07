@@ -107,8 +107,8 @@ def _best_reading(name: str) -> _Reading | None:
             total += 2.0 * p.chars if right == UTF8 else -accented_letter_penalty(raw, spans)
             if best is None or total > best.total:
                 best = _Reading(text, f"{wrong}→{right}", p, total, False)
-    if best is None:
-        return None
+    if best is None or base.letters == 0:
+        return None  # nothing but punctuation beside the ASCII (R･O･N): not a misreading
     gain = best.total - max(base.score, 0.0)
     if base.anomalies >= 1 or (base.profile == WEST and not convincing(base)):
         # the name has characters no real name has: a reading without them wins
@@ -187,6 +187,15 @@ def fix_name(name: str, *, is_dir: bool = False, pua: bool = True, mojibake: boo
             reasons.append("windows")
 
     return NameFix(name, text, tuple(reasons), suggestion, suggestion_reason)
+
+
+def misreading(text: str) -> tuple[str, str, bool] | None:
+    """``(repaired text, route, confident)`` if ``text`` looks like one code
+    page read as another - the same test names get, for tag values."""
+    if len(text) > 200 or all(ch < "\x80" for ch in text):
+        return None
+    reading = _best_reading(text)
+    return (reading.text, reading.route, reading.confident) if reading is not None else None
 
 
 def confident_route(name: str, is_dir: bool = False) -> str | None:

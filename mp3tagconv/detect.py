@@ -129,10 +129,26 @@ def _decode(data: bytes, encoding: str, truncated: bool):
     raise UnicodeDecodeError(encoding, data, 0, len(data), "undecodable")
 
 
-def detect(data: bytes, *, hints: Hints | None = None,
-           priors: Mapping[str, float] | None = None, truncated: bool = False,
-           damaged_context: bool = False,
-           encodings: Iterable[str] = charsets.TAG_ENCODINGS) -> Detection:
+def detect(data: bytes, **options) -> Detection:
+    """:func:`_detect`, forgiving the filler some taggers leave after the text.
+
+    ``朋友的朋友`` in Big5 followed by a stray 0xFF is not Big5 any more, and
+    would come out as Western gibberish with a ``ÿ`` at the end.
+    """
+    found = _detect(data, **options)
+    trimmed = data.rstrip(b"\xff\x00 ")
+    if trimmed != data and b"\xff" in data[len(trimmed):] and any(b >= 0x80 for b in trimmed) \
+            and (found.encoding in (WESTERN, "latin-1") or found.verdict != OK):
+        without = _detect(trimmed, **options)
+        if without.encoding not in (WESTERN, "latin-1") and convincing(without.plaus):
+            return without
+    return found
+
+
+def _detect(data: bytes, *, hints: Hints | None = None,
+            priors: Mapping[str, float] | None = None, truncated: bool = False,
+            damaged_context: bool = False,
+            encodings: Iterable[str] = charsets.TAG_ENCODINGS) -> Detection:
     """Decode ``data`` with the most plausible of ``encodings``.
 
     ``truncated`` says the bytes come from a fixed-width field (ID3v1), so a

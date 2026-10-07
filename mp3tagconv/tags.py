@@ -19,8 +19,8 @@ from mutagen.id3 import (APIC, COMM, ID3, TCON, TDRC, TIT2, TXXX, USLT, Encoding
 from .charsets import BIG5, EUCJP, EUCKR, GBK, SJIS, WESTERN
 from .detect import DEFAULT_PRIORS, HIGH, Detection, Hints, detect, repair_unicode
 from .japanese import restore_marks
-from .names import title_from_filename
-from .plausibility import GARBLED, OK, SUSPECT
+from .names import misreading, title_from_filename
+from .plausibility import GARBLED, OK, SUSPECT, plausibility, verdict
 
 ID3V2, ID3V1, APE, FILENAME = "ID3v2", "ID3v1", "APEv2", "filename"
 
@@ -350,6 +350,7 @@ def _decide(slot: Slot, hints: Hints, priors: Mapping[str, float], force: str | 
 
 
 _WIDENED = "unicode-"  # Detection.encoding prefix of repaired Unicode text
+_MISREAD = "misread "  # ... and of Unicode text that was one code page read as another
 
 
 def votes(loaded: Loaded) -> Counter:
@@ -365,12 +366,17 @@ def votes(loaded: Loaded) -> Counter:
             tally[r.encoding] += 1
         elif slot.raw is None and r.encoding.startswith(_WIDENED) and r.encoding[len(_WIDENED):] in _LEGACY:
             tally[r.encoding] += 1
+        elif slot.raw is None and r.encoding == "unicode":
+            reading = misreading(slot.stored)
+            if reading and reading[2]:
+                tally[_MISREAD + reading[1]] += 1
     return tally
 
 
 def _top(tally: Counter, widened: bool) -> str | None:
     """Most voted-for encoding among the legacy (or the widened) ones."""
-    ranked = [key for key, _ in tally.most_common() if key.startswith(_WIDENED) == widened]
+    ranked = [key for key, _ in tally.most_common()
+              if key.startswith(_WIDENED) == widened and not key.startswith(_MISREAD)]
     return ranked[0] if ranked else None
 
 
@@ -398,6 +404,17 @@ def second_pass(loaded: Loaded, directory_votes: Counter, force: str | None = No
             if slot.raw is None and slot.result.encoding == "unicode":
                 slot.result = repair_unicode(slot.stored, hints=loaded.hints, priors=priors,
                                              trusted=widened[len(_WIDENED):])
+    # Unicode text that is one code page read as another (楅栘 for 鈴木): a
+    # field that proves the route vouches for the short ones beside it
+    readings = {id(slot): misreading(slot.stored) for slot in loaded.slots()
+                if slot.raw is None and slot.result.encoding == "unicode"}
+    proven = {reading[1] for reading in readings.values() if reading and reading[2]}
+    proven |= {key[len(_MISREAD):] for key in directory_votes if key.startswith(_MISREAD)}
+    for slot in loaded.slots():
+        reading = readings.get(id(slot))
+        if reading and reading[1] in proven:
+            p = plausibility(reading[0])
+            slot.result = Detection(reading[0], _MISREAD + reading[1], 99.0, p, verdict(p))
     # one field beyond repair means the same accident hit its neighbours
     if any(slot.verdict == GARBLED for slot in loaded.slots()):
         for slot in loaded.slots():
@@ -619,9 +636,14 @@ def plan(loaded: Loaded, fix_marks: bool = False) -> Plan:
     date = tags.get("TDRC")
     if date is not None:
         date.text = [ID3TimeStamp(_timestamp(str(stamp))) for stamp in date.text]
-    for frame in tags.values():
+    for key, frame in list(tags.items()):
         if hasattr(frame, "encoding"):
             frame.encoding = Encoding.UTF8
+        # a text frame that says nothing is not written at all, and would
+        # make the new tag fail to read back as planned
+        if key[0] == "T" and not any(str(value) for value in frame.text):
+            del tags[key]
+            changed = True
 
     if (changed or layout.id3v2 is None or layout.id3v2[0] != 4
             or layout.id3v1_at is not None or layout.apev2 or layout.lyrics3):

@@ -129,6 +129,40 @@ def test_apev2_text_that_is_not_utf8(tmp_path):
     assert path.read_bytes().endswith(AUDIO)
 
 
+def test_empty_text_frames_are_dropped(tmp_path, make_mp3):
+    path = make_mp3("a.mp3", frames=[TIT2(encoding=1, text=["x"]), TCON(encoding=1, text=[]),
+                                     TXXX(encoding=1, desc="DATE", text=[""])])
+    result = convert(tmp_path)
+    assert (result.written, result.errors) == (1, 0)
+    assert sorted(ID3(path).keys()) == ["TIT2"]
+
+
+def test_filler_after_the_text_is_ignored(tmp_path, make_mp3):
+    # Big5 with a stray 0xFF and a space behind it: not valid Big5 as a whole
+    stored = (encode("朋友的朋友", BIG5) + b"\xff ").decode("latin-1")
+    path = make_mp3("a.mp3", frames=[TALB(encoding=0, text=[stored]),
+                                     TPE1(encoding=0, text=["Beyonc\xe9"])])
+    convert(tmp_path)
+    assert text(path, "TALB") == ["朋友的朋友"]
+    assert text(path, "TPE1") == ["Beyoncé"]
+
+
+def test_unicode_value_read_with_the_wrong_code_page(tmp_path, make_mp3):
+    # Shift_JIS that a tool read as GBK before storing it as UTF-8 in APEv2
+    misread = lambda s: s.encode("cp932").decode("gbk")  # noqa: E731
+    proof = make_mp3("x/01.mp3", ape={"Composer": misread("鈴木キサブロー"), "Title": "plain"})
+    short = make_mp3("x/02.mp3", ape={"Composer": misread("大森俊之")})
+    fine = make_mp3("y/01.mp3", ape={"Composer": misread("大森俊之"), "Artist": "陳奕迅"})
+    result = convert(tmp_path)
+    assert result.errors == 0
+    assert text(proof, "TCOM") == ["鈴木キサブロー"]
+    assert text(proof, "TIT2") == ["plain"]
+    assert text(short, "TCOM") == ["大森俊之"]
+    # sound text in the same tag is not dragged along
+    assert text(fine, "TCOM") == ["大森俊之"]
+    assert text(fine, "TPE1") == ["陳奕迅"]
+
+
 def test_id3v2_wins_over_apev2_wins_over_id3v1(tmp_path, make_mp3):
     path = make_mp3(
         "a.mp3",
