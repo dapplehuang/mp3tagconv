@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from mutagen.apev2 import APENoHeaderError, APEv2
-from mutagen.id3 import (COMM, ID3, TALB, TCON, TDAT, TDRC, TIT2, TPE1, TPUB, TRCK, TXXX, TYER,
+from mutagen.id3 import (COMM, ID3, TALB, TCON, TDAT, TDRC, TIPL, TIT2, TPE1, TPUB, TRCK, TXXX, TYER,
                          Encoding, ID3NoHeaderError)
 
 from conftest import AUDIO, cp950_view, encode, id3v1, legacy
@@ -135,6 +135,15 @@ def test_empty_text_frames_are_dropped(tmp_path, make_mp3):
     result = convert(tmp_path)
     assert (result.written, result.errors) == (1, 0)
     assert sorted(ID3(path).keys()) == ["TIT2"]
+
+
+def test_people_frames_are_kept(tmp_path, make_mp3):
+    # TIPL starts with T but holds role/name pairs, not text
+    path = make_mp3("a.mp3", frames=[TIT2(encoding=1, text=["x"]),
+                                     TIPL(encoding=1, people=[["arranger", "藤間仁"]])])
+    result = convert(tmp_path)
+    assert (result.written, result.errors) == (1, 0)
+    assert ID3(path)["TIPL"].people == [["arranger", "藤間仁"]]
 
 
 def test_filler_after_the_text_is_ignored(tmp_path, make_mp3):

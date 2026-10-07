@@ -641,7 +641,8 @@ def plan(loaded: Loaded, fix_marks: bool = False) -> Plan:
             frame.encoding = Encoding.UTF8
         # a text frame that says nothing is not written at all, and would
         # make the new tag fail to read back as planned
-        if key[0] == "T" and not any(str(value) for value in frame.text):
+        # (TIPL and TMCL hold pairs of people, not text)
+        if key[0] == "T" and hasattr(frame, "text") and not any(str(value) for value in frame.text):
             del tags[key]
             changed = True
 
