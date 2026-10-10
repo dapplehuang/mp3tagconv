@@ -221,4 +221,5 @@ __marimo__/
 
 # mp3tagconv output
 mp3tagconv-*.txt
+mp3tagconv-*.jsonl
 mp3tagconv-undo-*/
